@@ -1,18 +1,36 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `npm run deploy` to publish your worker
- *
- * Bind resources to your worker in `wrangler.jsonc`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+import { cleanUrl } from "./cleaner";
+import { RulesCache } from "./rules-cache";
+
+type Env = {
+	RULES_CACHE: DurableObjectNamespace<RulesCache>;
+};
+
+export { RulesCache };
 
 export default {
-	async fetch(request, env, ctx): Promise<Response> {
-		return new Response('Hello World!');
+	async fetch(request, env, _ctx): Promise<Response> {
+		const url = new URL(request.url);
+		const targetUrl = url.searchParams.get("url");
+
+		if (!targetUrl) {
+			return new Response("Missing url parameter", { status: 400 });
+		}
+
+		try {
+			const rulesStub = env.RULES_CACHE.getByName("rules");
+			const rules = await rulesStub.getRules();
+
+			const cleanedUrl = await cleanUrl(targetUrl, rules);
+			return new Response(cleanedUrl, {
+				headers: {
+					"Content-Type": "text/plain",
+					"Access-Control-Allow-Origin": "*",
+				},
+			});
+		} catch (error) {
+			return new Response(`Error processing URL: ${error instanceof Error ? error.message : "Unknown error"}`, {
+				status: 500,
+			});
+		}
 	},
 } satisfies ExportedHandler<Env>;
