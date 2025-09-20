@@ -188,4 +188,21 @@ describe("URL Cleaner worker", () => {
 		expect(deleteResponse.status).toBe(404);
 		expect(await deleteResponse.text()).toBe("Cache entry not found");
 	});
+
+	it("returns 405 for unsupported HTTP methods", async () => {
+		const testUrl = "https://example.com?utm_source=test";
+
+		const postResponse = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`, {
+			method: "POST",
+		});
+		expect(postResponse.status).toBe(405);
+		expect(postResponse.headers.get("Allow")).toBe("GET, DELETE");
+		expect(await postResponse.text()).toBe("Method not allowed");
+
+		const putResponse = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`, {
+			method: "PUT",
+		});
+		expect(putResponse.status).toBe(405);
+		expect(await putResponse.text()).toBe("Method not allowed");
+	});
 });

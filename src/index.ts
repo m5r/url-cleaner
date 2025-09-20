@@ -9,6 +9,17 @@ export { RulesCache };
 
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
+		if (request.method !== "GET" && request.method !== "DELETE") {
+			return new Response("Method not allowed", {
+				status: 405,
+				headers: {
+					"Allow": "GET, DELETE",
+					"Content-Type": "text/plain",
+					"Access-Control-Allow-Origin": "*",
+				}
+			});
+		}
+
 		const url = new URL(request.url);
 		const targetUrl = url.searchParams.get("url");
 
