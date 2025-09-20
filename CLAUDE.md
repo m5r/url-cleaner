@@ -19,6 +19,8 @@ This is a Cloudflare Workers project called "url-cleaner" built with TypeScript.
 
 ## API Usage
 
+### Clean URL Endpoint
+
 **Endpoint**: `GET /?url=<encoded-url>`
 **Response**: Plain text containing the cleaned URL
 
@@ -26,6 +28,16 @@ This is a Cloudflare Workers project called "url-cleaner" built with TypeScript.
 
 - `/?url=https://example.com?utm_source=test` → `https://example.com`
 - `/?url=https://youtube.com/watch?v=abc&feature=share` → `https://youtube.com/watch?v=abc`
+
+### Cache Purge Endpoint
+
+**Endpoint**: `DELETE /?url=<encoded-url>`
+**Response**: Plain text confirming cache deletion
+
+**Examples**:
+
+- `DELETE /?url=https://example.com?utm_source=test` → `Cache entry deleted` (200)
+- `DELETE /?url=https://nonexistent.com` → `Cache entry not found` (404)
 
 ## Common Commands
 
@@ -67,7 +79,8 @@ test/
 - **Fragment Cleaning**: Removes tracking from URL fragments/hash parameters (`#utm_campaign=test`)
 - **Raw Rules Support**: Handles complex regex-based cleaning for advanced tracking patterns
 - **Loop Prevention**: Tracks visited URLs to prevent infinite redirect loops
-- **Response Caching**: 1-hour cache for improved performance
+- **Response Caching**: 1-hour cache using Cloudflare Cache API for improved performance
+- **Cache Management**: DELETE endpoint for manual cache purging
 
 ### Rule System
 

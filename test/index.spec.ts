@@ -157,4 +157,35 @@ describe("URL Cleaner worker", () => {
 		expect(response.status).toBe(200); // Should return original URL, not error
 		expect(await response.text()).toBe("not-a-valid-url");
 	});
+
+	it("deletes cache entry on DELETE request", async () => {
+		// First, make a GET request to cache the response
+		const testUrl = "https://tiktok.com/video?_t=tracking&_r=more&u_code=123&normal=keep&other=stay";
+		const getResponse = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(getResponse.status).toBe(200);
+		expect(await getResponse.text()).toBe("https://tiktok.com/video?normal=keep&other=stay");
+
+		// Then delete the cache entry
+		const deleteResponse = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`, {
+			method: "DELETE",
+		});
+		expect(deleteResponse.status).toBe(200);
+		expect(await deleteResponse.text()).toBe("Cache entry deleted");
+
+		const subsequentDeleteResponse = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`, {
+			method: "DELETE",
+		});
+		expect(subsequentDeleteResponse.status).toBe(404);
+		expect(await subsequentDeleteResponse.text()).toBe("Cache entry not found");
+	});
+
+	it("returns 404 when deleting non-existent cache entry", async () => {
+		const testUrl = "https://nonexistent.com?param=value";
+
+		const deleteResponse = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`, {
+			method: "DELETE",
+		});
+		expect(deleteResponse.status).toBe(404);
+		expect(await deleteResponse.text()).toBe("Cache entry not found");
+	});
 });

@@ -19,6 +19,17 @@ export default {
 		const cache = caches.default;
 		const cacheKey = new Request(`${url.origin}/cache/${encodeURIComponent(targetUrl)}`);
 
+		if (request.method === "DELETE") {
+			const deleted = await cache.delete(cacheKey);
+			return new Response(deleted ? "Cache entry deleted" : "Cache entry not found", {
+				status: deleted ? 200 : 404,
+				headers: {
+					"Content-Type": "text/plain",
+					"Access-Control-Allow-Origin": "*",
+				},
+			});
+		}
+
 		let response = await cache.match(cacheKey);
 		if (response) {
 			return response;
