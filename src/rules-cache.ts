@@ -1,9 +1,21 @@
 import { DurableObject } from "cloudflare:workers";
-import type { ClearURLsRules } from "./types";
+import type { ClearURLsRules, ClearURLsProvider } from "./types";
 
 const RULES_URL = "https://rules2.clearurls.xyz/data.minify.json";
 const HASH_URL = "https://rules2.clearurls.xyz/rules.minify.hash";
 const CACHE_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+// Custom rules for tracking parameters not yet in ClearURLs database
+const CUSTOM_RULES = {
+	airbnb: {
+		// Additional Airbnb tracking parameters found in share URLs
+		rules: ["viralityEntryPoint", "unique_share_id", "slcid", "s", "slug"],
+	},
+	google: {
+		// Additional Google Maps tracking parameters
+		rules: ["lucs", "g_ep", "skid", "g_st"],
+	},
+};
 
 type CachedRules = {
 	data: ClearURLsRules;
@@ -17,12 +29,15 @@ export class RulesCache extends DurableObject {
 		try {
 			const cached = await this.ctx.storage.get<CachedRules>("rules");
 
+			let baseRules: ClearURLsRules;
 			if (cached && Date.now() < cached.expiresAt) {
-				return cached.data;
+				baseRules = cached.data;
+			} else {
+				console.log("Fetching fresh rules from ClearURLs");
+				baseRules = await this.fetchAndCacheRules();
 			}
 
-			console.log("Fetching fresh rules from ClearURLs");
-			return await this.fetchAndCacheRules();
+			return this.mergeCustomRules(baseRules);
 		} catch (error) {
 			console.error("Error getting rules:", error);
 
@@ -30,7 +45,7 @@ export class RulesCache extends DurableObject {
 			const cached = await this.ctx.storage.get<CachedRules>("rules");
 			if (cached) {
 				console.log("Falling back to expired cached rules");
-				return cached.data;
+				return this.mergeCustomRules(cached.data);
 			}
 
 			throw new Error("Failed to get rules and no cached fallback available");
@@ -73,5 +88,23 @@ export class RulesCache extends DurableObject {
 		const hashBuffer = await crypto.subtle.digest("SHA-256", data);
 		const hashArray = Array.from(new Uint8Array(hashBuffer));
 		return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+	}
+
+	private mergeCustomRules(rules: ClearURLsRules) {
+		const mergedRules = structuredClone(rules);
+
+		this.mergeProviderRules(mergedRules.providers.airbnb, CUSTOM_RULES.airbnb.rules);
+		this.mergeProviderRules(mergedRules.providers.google, CUSTOM_RULES.google.rules);
+
+		return mergedRules;
+	}
+
+	private mergeProviderRules(provider: ClearURLsProvider | undefined, customRules: string[]) {
+		if (!provider) {
+			return;
+		}
+
+		const existingRules = provider.rules ?? [];
+		provider.rules = [...new Set([...existingRules, ...customRules])];
 	}
 }
