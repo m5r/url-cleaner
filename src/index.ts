@@ -8,15 +8,15 @@ type Env = {
 export { RulesCache };
 
 export default {
-	async fetch(request, env, ctx): Promise<Response> {
+	async fetch(request, env, ctx) {
 		if (request.method !== "GET" && request.method !== "DELETE") {
 			return new Response("Method not allowed", {
 				status: 405,
 				headers: {
-					"Allow": "GET, DELETE",
+					Allow: "GET, DELETE",
 					"Content-Type": "text/plain",
 					"Access-Control-Allow-Origin": "*",
-				}
+				},
 			});
 		}
 

@@ -1,6 +1,6 @@
 import type { ClearURLsRules } from "./types";
 
-export async function cleanUrl(inputUrl: string, rules: ClearURLsRules, maxRedirects = 5, visited = new Set<string>()): Promise<string> {
+export async function cleanUrl(inputUrl: string, rules: ClearURLsRules, maxRedirects = 5, visited = new Set<string>()) {
 	try {
 		const currentUrl = new URL(inputUrl);
 
@@ -18,6 +18,7 @@ export async function cleanUrl(inputUrl: string, rules: ClearURLsRules, maxRedir
 
 		// Then check for HTTP redirects
 		const redirectTarget = await followRedirect(currentUrl.href);
+		console.log("redirectTarget", redirectTarget);
 		if (redirectTarget && redirectTarget !== currentUrl.href) {
 			return await cleanUrl(redirectTarget, rules, maxRedirects, visited);
 		}
@@ -29,7 +30,7 @@ export async function cleanUrl(inputUrl: string, rules: ClearURLsRules, maxRedir
 	}
 }
 
-async function followRedirect(url: string): Promise<string | null> {
+async function followRedirect(url: string) {
 	// @ts-ignore - Skip redirect following in tests to avoid external HTTP calls
 	if (typeof global !== "undefined" && global.process?.env?.NODE_ENV === "test") {
 		return null;
@@ -39,6 +40,19 @@ async function followRedirect(url: string): Promise<string | null> {
 		const response = await fetch(url, {
 			method: "HEAD",
 			redirect: "manual",
+			headers: {
+				"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:143.0) Gecko/20100101 Firefox/143.0",
+				Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+				"Accept-Language": "en-US,en;q=0.5",
+				"Accept-Encoding": "gzip, deflate, br, zstd",
+				"Sec-GPC": "1",
+				"Upgrade-Insecure-Requests": "1",
+				"Sec-Fetch-Dest": "document",
+				"Sec-Fetch-Mode": "navigate",
+				"Sec-Fetch-Site": "none",
+				"Sec-Fetch-User": "?1",
+				Connection: "keep-alive",
+			},
 		});
 
 		if (response.status >= 300 && response.status < 400) {
@@ -59,7 +73,7 @@ async function followRedirect(url: string): Promise<string | null> {
 	}
 }
 
-function cleanUrlParameters(url: URL, providers: ClearURLsRules["providers"]): string {
+function cleanUrlParameters(url: URL, providers: ClearURLsRules["providers"]) {
 	const matchingProvider = findMatchingProvider(url.href, providers);
 
 	if (!matchingProvider) {
@@ -169,7 +183,7 @@ function cleanFragmentsByRules(url: URL, rules: string[]) {
 	return url;
 }
 
-function extractFragments(url: URL): Map<string, string | null> {
+function extractFragments(url: URL) {
 	const fragments = new Map<string, string | null>();
 	const hash = url.hash.slice(1); // Remove the #
 
@@ -191,7 +205,7 @@ function extractFragments(url: URL): Map<string, string | null> {
 	return fragments;
 }
 
-function fragmentsToString(fragments: Map<string, string | null>): string {
+function fragmentsToString(fragments: Map<string, string | null>) {
 	const parts: string[] = [];
 	for (const [key, value] of fragments) {
 		if (value !== null) {
@@ -203,7 +217,7 @@ function fragmentsToString(fragments: Map<string, string | null>): string {
 	return parts.length > 0 ? parts.join("&") : "";
 }
 
-function isException(url: string, exceptions: string[]): boolean {
+function isException(url: string, exceptions: string[]) {
 	for (const exception of exceptions) {
 		try {
 			const regex = new RegExp(exception, "i");
@@ -217,7 +231,7 @@ function isException(url: string, exceptions: string[]): boolean {
 	return false;
 }
 
-function checkClearUrlsRedirections(url: string, providers: ClearURLsRules["providers"]): string | null {
+function checkClearUrlsRedirections(url: string, providers: ClearURLsRules["providers"]) {
 	const matchingProvider = findMatchingProvider(url, providers);
 
 	if (!matchingProvider || !matchingProvider.redirections) {
