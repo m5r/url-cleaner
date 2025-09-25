@@ -18,7 +18,6 @@ export async function cleanUrl(inputUrl: string, rules: ClearURLsRules, maxRedir
 
 		// Then check for HTTP redirects
 		const redirectTarget = await followRedirect(currentUrl.href);
-		console.log("redirectTarget", redirectTarget);
 		if (redirectTarget && redirectTarget !== currentUrl.href) {
 			return await cleanUrl(redirectTarget, rules, maxRedirects, visited);
 		}
