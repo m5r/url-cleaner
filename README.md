@@ -10,7 +10,7 @@ For iPhone and iPad users, we provide a convenient iOS Shortcut that integrates 
 
 #### Installation
 
-Get it from the iCloud link: https://www.icloud.com/shortcuts/8e8fdf8350f249e488ce1fdbeab4b8b3
+Get it from the iCloud link: https://www.icloud.com/shortcuts/a52e8aebc61e4c5bb81ecba452c16a03
 When you open the link, iOS will prompt you to install the shortcut, simply tap **Add Shortcut** to complete the installation.
 
 The shortcut file is also available in this repository as `Clean URLs.shortcut` for reference.
