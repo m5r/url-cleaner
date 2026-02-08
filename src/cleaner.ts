@@ -29,41 +29,40 @@ export async function cleanUrl(inputUrl: string, rules: ClearURLsRules, maxRedir
 	}
 }
 
-async function followRedirect(url: string) {
-	// @ts-ignore - Skip redirect following in tests to avoid external HTTP calls
-	if (typeof global !== "undefined" && global.process?.env?.NODE_ENV === "test") {
-		return null;
+function extractRedirectLocation(originalUrl: string, response: Response) {
+	if (response.status < 300 || response.status >= 400) return null;
+	const location = response.headers.get("Location");
+	if (!location) return null;
+	if (location.startsWith("/")) {
+		const base = new URL(originalUrl);
+		return `${base.protocol}//${base.host}${location}`;
 	}
+	return location;
+}
+
+async function followRedirect(url: string) {
+	const headers: HeadersInit = {
+		"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:143.0) Gecko/20100101 Firefox/143.0",
+		Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Accept-Language": "en-US,en;q=0.5",
+		"Accept-Encoding": "gzip, deflate, br, zstd",
+		"Sec-GPC": "1",
+		"Upgrade-Insecure-Requests": "1",
+		"Sec-Fetch-Dest": "document",
+		"Sec-Fetch-Mode": "navigate",
+		"Sec-Fetch-Site": "none",
+		"Sec-Fetch-User": "?1",
+		Connection: "keep-alive",
+	};
 
 	try {
-		const response = await fetch(url, {
-			method: "HEAD",
-			redirect: "manual",
-			headers: {
-				"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:143.0) Gecko/20100101 Firefox/143.0",
-				Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-				"Accept-Language": "en-US,en;q=0.5",
-				"Accept-Encoding": "gzip, deflate, br, zstd",
-				"Sec-GPC": "1",
-				"Upgrade-Insecure-Requests": "1",
-				"Sec-Fetch-Dest": "document",
-				"Sec-Fetch-Mode": "navigate",
-				"Sec-Fetch-Site": "none",
-				"Sec-Fetch-User": "?1",
-				Connection: "keep-alive",
-			},
-		});
+		const headResponse = await fetch(url, { method: "HEAD", redirect: "manual", headers });
+		const redirect = extractRedirectLocation(url, headResponse);
+		if (redirect) return redirect;
 
-		if (response.status >= 300 && response.status < 400) {
-			const location = response.headers.get("Location");
-			if (location) {
-				// Handle relative redirects
-				if (location.startsWith("/")) {
-					const baseUrl = new URL(url);
-					return `${baseUrl.protocol}//${baseUrl.host}${location}`;
-				}
-				return location;
-			}
+		if (headResponse.status === 404 || headResponse.status === 405) {
+			const getResponse = await fetch(url, { method: "GET", redirect: "manual", headers });
+			return extractRedirectLocation(url, getResponse);
 		}
 
 		return null;

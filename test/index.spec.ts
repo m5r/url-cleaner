@@ -1,5 +1,5 @@
-import { env, createExecutionContext, waitOnExecutionContext, SELF } from "cloudflare:test";
-import { describe, it, expect, beforeAll } from "vitest";
+import { env, createExecutionContext, waitOnExecutionContext, fetchMock, SELF } from "cloudflare:test";
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 
 import worker, { RulesCache } from "../src/index";
 import type { ClearURLsRules } from "../src/types";
@@ -93,6 +93,24 @@ beforeAll(() => {
 });
 
 describe("URL Cleaner worker", () => {
+	beforeEach(() => {
+		fetchMock.activate();
+		fetchMock.disableNetConnect();
+		for (const origin of [
+			"https://example.com",
+			"https://youtube.com",
+			"https://amazon.com",
+			"https://google.com",
+			"https://tiktok.com",
+			"https://unknown-site.com",
+			"https://nonexistent.com",
+		]) {
+			fetchMock.get(origin).intercept({ path: /.*/, method: "HEAD" }).reply(200).persist();
+		}
+	});
+
+	afterEach(() => fetchMock.deactivate());
+
 	it("cleans global tracking parameters", async () => {
 		const testUrl = "https://example.com?utm_source=test&utm_medium=email&normal=keep";
 		const request = new IncomingRequest(`http://example.com/?url=${encodeURIComponent(testUrl)}`);
@@ -204,5 +222,83 @@ describe("URL Cleaner worker", () => {
 		});
 		expect(putResponse.status).toBe(405);
 		expect(await putResponse.text()).toBe("Method not allowed");
+	});
+});
+
+describe("Redirect following", () => {
+	beforeEach(() => {
+		fetchMock.activate();
+		fetchMock.disableNetConnect();
+	});
+
+	afterEach(() => fetchMock.deactivate());
+
+	it("follows redirect when HEAD returns 3xx", async () => {
+		fetchMock
+			.get("https://short.test")
+			.intercept({ path: "/abc", method: "HEAD" })
+			.reply(301, "", { headers: { Location: "https://no-redirect.test/target" } });
+
+		const testUrl = "https://short.test/abc";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://no-redirect.test/target");
+	});
+
+	it("falls back to GET when HEAD returns 404", async () => {
+		const pool = fetchMock.get("https://amzn-short.test");
+		pool.intercept({ path: "/d/abc123", method: "HEAD" }).reply(404);
+		pool
+			.intercept({ path: "/d/abc123", method: "GET" })
+			.reply(301, "", { headers: { Location: "https://amazon.com/dp/B123?ref_=tracking&tag=mytag" } });
+
+		const testUrl = "https://amzn-short.test/d/abc123";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://amazon.com/dp/B123");
+	});
+
+	it("falls back to GET when HEAD returns 405", async () => {
+		const pool = fetchMock.get("https://head-unsupported.test");
+		pool.intercept({ path: "/link", method: "HEAD" }).reply(405);
+		pool
+			.intercept({ path: "/link", method: "GET" })
+			.reply(302, "", { headers: { Location: "https://no-redirect.test/destination" } });
+
+		const testUrl = "https://head-unsupported.test/link";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://no-redirect.test/destination");
+	});
+
+	it("does not fall back to GET when HEAD returns 200", async () => {
+		fetchMock
+			.get("https://no-redirect.test")
+			.intercept({ path: "/page?utm_source=test", method: "HEAD" })
+			.reply(200);
+
+		const testUrl = "https://no-redirect.test/page?utm_source=test";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://no-redirect.test/page");
+	});
+
+	it("cleans parameters on the redirect target", async () => {
+		fetchMock
+			.get("https://redir.test")
+			.intercept({ path: "/go", method: "HEAD" })
+			.reply(301, "", { headers: { Location: "https://youtube.com/watch?v=xyz&feature=share&si=track" } });
+
+		const testUrl = "https://redir.test/go";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://youtube.com/watch?v=xyz");
+	});
+
+	it("handles relative redirect locations", async () => {
+		const pool = fetchMock.get("https://relative.test");
+		pool
+			.intercept({ path: "/short", method: "HEAD" })
+			.reply(301, "", { headers: { Location: "/full/path" } });
+		pool.intercept({ path: "/full/path", method: "HEAD" }).reply(200);
+
+		const testUrl = "https://relative.test/short";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://relative.test/full/path");
 	});
 });
