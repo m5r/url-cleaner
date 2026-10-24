@@ -33,11 +33,25 @@ function extractRedirectLocation(originalUrl: string, response: Response) {
 	if (response.status < 300 || response.status >= 400) return null;
 	const location = response.headers.get("Location");
 	if (!location) return null;
-	if (location.startsWith("/")) {
-		const base = new URL(originalUrl);
-		return `${base.protocol}//${base.host}${location}`;
+	const target = new URL(location, originalUrl).href;
+	// Login walls (e.g. Instagram for datacenter IPs) redirect to `/login?next=<original url>`
+	if (pointsBackTo(target, originalUrl)) return null;
+	return target;
+}
+
+function pointsBackTo(target: string, source: string) {
+	const sourceUrl = new URL(source);
+	const targetUrl = new URL(target);
+	const inheritedValues = new Set(sourceUrl.searchParams.values());
+	for (const value of targetUrl.searchParams.values()) {
+		if (inheritedValues.has(value)) continue;
+		if (!value.startsWith("/") && !/^https?:/i.test(value)) continue;
+		try {
+			const candidate = new URL(value, targetUrl);
+			if (candidate.host === sourceUrl.host && candidate.pathname === sourceUrl.pathname) return true;
+		} catch {}
 	}
-	return location;
+	return false;
 }
 
 async function followRedirect(url: string) {

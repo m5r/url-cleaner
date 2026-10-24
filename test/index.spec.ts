@@ -259,9 +259,7 @@ describe("Redirect following", () => {
 	it("falls back to GET when HEAD returns 405", async () => {
 		const pool = fetchMock.get("https://head-unsupported.test");
 		pool.intercept({ path: "/link", method: "HEAD" }).reply(405);
-		pool
-			.intercept({ path: "/link", method: "GET" })
-			.reply(302, "", { headers: { Location: "https://no-redirect.test/destination" } });
+		pool.intercept({ path: "/link", method: "GET" }).reply(302, "", { headers: { Location: "https://no-redirect.test/destination" } });
 
 		const testUrl = "https://head-unsupported.test/link";
 		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
@@ -269,10 +267,7 @@ describe("Redirect following", () => {
 	});
 
 	it("does not fall back to GET when HEAD returns 200", async () => {
-		fetchMock
-			.get("https://no-redirect.test")
-			.intercept({ path: "/page?utm_source=test", method: "HEAD" })
-			.reply(200);
+		fetchMock.get("https://no-redirect.test").intercept({ path: "/page?utm_source=test", method: "HEAD" }).reply(200);
 
 		const testUrl = "https://no-redirect.test/page?utm_source=test";
 		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
@@ -292,13 +287,83 @@ describe("Redirect following", () => {
 
 	it("handles relative redirect locations", async () => {
 		const pool = fetchMock.get("https://relative.test");
-		pool
-			.intercept({ path: "/short", method: "HEAD" })
-			.reply(301, "", { headers: { Location: "/full/path" } });
+		pool.intercept({ path: "/short", method: "HEAD" }).reply(301, "", { headers: { Location: "/full/path" } });
 		pool.intercept({ path: "/full/path", method: "HEAD" }).reply(200);
 
 		const testUrl = "https://relative.test/short";
 		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
 		expect(await response.text()).toBe("https://relative.test/full/path");
+	});
+
+	it("does not follow login-wall redirects that embed the original URL", async () => {
+		fetchMock
+			.get("https://walled.test")
+			.intercept({ path: "/profile", method: "HEAD" })
+			.reply(302, "", {
+				headers: { Location: "https://walled.test/accounts/login/?next=https%3A%2F%2Fwalled.test%2Fprofile&amp;is_from_rle=" },
+			});
+
+		const testUrl = "https://walled.test/profile";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://walled.test/profile");
+	});
+
+	it("does not follow login-wall redirects that embed the original path", async () => {
+		fetchMock
+			.get("https://walled.test")
+			.intercept({ path: "/profile", method: "HEAD" })
+			.reply(302, "", { headers: { Location: "/login?return_to=%2Fprofile" } });
+
+		const testUrl = "https://walled.test/profile";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://walled.test/profile");
+	});
+
+	it("follows HTTPS upgrades when the source already carries a self-referential param", async () => {
+		fetchMock
+			.get("http://canon.test")
+			.intercept({ path: "/article?next=%2Farticle", method: "HEAD" })
+			.reply(301, "", { headers: { Location: "https://canon.test/article?next=%2Farticle" } });
+		fetchMock.get("https://canon.test").intercept({ path: "/article?next=%2Farticle", method: "HEAD" }).reply(200);
+
+		const testUrl = "http://canon.test/article?next=%2Farticle";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://canon.test/article?next=%2Farticle");
+	});
+
+	it("follows trailing-slash canonicalization when the source already carries a self-referential param", async () => {
+		const pool = fetchMock.get("https://canon.test");
+		pool
+			.intercept({ path: "/article?next=%2Farticle", method: "HEAD" })
+			.reply(301, "", { headers: { Location: "/article/?next=%2Farticle" } });
+		pool.intercept({ path: "/article/?next=%2Farticle", method: "HEAD" }).reply(200);
+
+		const testUrl = "https://canon.test/article?next=%2Farticle";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://canon.test/article/?next=%2Farticle");
+	});
+
+	it("resolves relative params against the redirect target, not the source", async () => {
+		fetchMock
+			.get("https://short.test")
+			.intercept({ path: "/offer", method: "HEAD" })
+			.reply(301, "", { headers: { Location: "https://shop.test/landing?continue=%2Foffer" } });
+		fetchMock.get("https://shop.test").intercept({ path: "/landing?continue=%2Foffer", method: "HEAD" }).reply(200);
+
+		const testUrl = "https://short.test/offer";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://shop.test/landing?continue=%2Foffer");
+	});
+
+	it("handles protocol-relative redirect locations", async () => {
+		fetchMock
+			.get("https://proto.test")
+			.intercept({ path: "/go", method: "HEAD" })
+			.reply(301, "", { headers: { Location: "//dest.test/page" } });
+		fetchMock.get("https://dest.test").intercept({ path: "/page", method: "HEAD" }).reply(200);
+
+		const testUrl = "https://proto.test/go";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://dest.test/page");
 	});
 });
