@@ -3,6 +3,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 
 import worker, { RulesCache } from "../src/index";
 import { cleanUrl } from "../src/cleaner";
+import { mergeCustomRules } from "../src/rules-cache";
 import type { ClearURLsRules } from "../src/types";
 
 // For now, you'll need to do something like this to get a correctly-typed
@@ -384,6 +385,34 @@ describe("Redirect following", () => {
 		const testUrl = "https://proto.test/go";
 		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
 		expect(await response.text()).toBe("https://dest.test/page");
+	});
+});
+
+describe("Custom rules", () => {
+	const upstreamXRules = ["(?:ref_?)?src", "s", "cn", "ref_url", "t"];
+	const upstreamRules: ClearURLsRules = {
+		providers: {
+			x: { urlPattern: "^https?:\\/\\/(?:[a-z0-9-]+\\.)*?x.com", rules: upstreamXRules },
+			twitter: { urlPattern: "^https?:\\/\\/(?:[a-z0-9-]+\\.)*?twitter.com", rules: upstreamXRules },
+			globalRules: { urlPattern: ".*", rules: ["utm_source"] },
+		},
+	};
+
+	beforeEach(() => {
+		fetchMock.activate();
+		fetchMock.disableNetConnect();
+	});
+
+	afterEach(() => fetchMock.deactivate());
+
+	it.each(["https://x.com", "https://twitter.com"])("strips the share fingerprint from %s links", async (origin) => {
+		fetchMock.get(origin).intercept({ path: /.*/, method: "HEAD" }).reply(200);
+
+		const cleaned = await cleanUrl(
+			`${origin}/user/status/123?a=uimaJy3bBcbyfnLBrjs&s=20&utm_source=share`,
+			mergeCustomRules(upstreamRules),
+		);
+		expect(cleaned).toBe(`${origin}/user/status/123`);
 	});
 });
 

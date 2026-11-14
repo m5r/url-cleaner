@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import type { ClearURLsRules, ClearURLsProvider } from "./types";
+import type { ClearURLsRules } from "./types";
 
 const RULES_URL = "https://rules2.clearurls.xyz/data.minify.json";
 const HASH_URL = "https://rules2.clearurls.xyz/rules.minify.hash";
@@ -14,6 +14,14 @@ const CUSTOM_RULES = {
 	google: {
 		// Additional Google Maps tracking parameters
 		rules: ["lucs", "g_ep", "skid", "g_st"],
+	},
+	// `a` is a per-share fingerprint added by "Copy link" (https://github.com/ClearURLs/Rules/issues/352).
+	// Drop once https://github.com/ClearURLs/Rules/pull/354 ships.
+	x: {
+		rules: ["a"],
+	},
+	twitter: {
+		rules: ["a"],
 	},
 };
 
@@ -37,7 +45,7 @@ export class RulesCache extends DurableObject {
 				baseRules = await this.fetchAndCacheRules();
 			}
 
-			return this.mergeCustomRules(baseRules);
+			return mergeCustomRules(baseRules);
 		} catch (error) {
 			console.error("Error getting rules:", error);
 
@@ -45,7 +53,7 @@ export class RulesCache extends DurableObject {
 			const cached = await this.ctx.storage.get<CachedRules>("rules");
 			if (cached) {
 				console.log("Falling back to expired cached rules");
-				return this.mergeCustomRules(cached.data);
+				return mergeCustomRules(cached.data);
 			}
 
 			throw new Error("Failed to get rules and no cached fallback available");
@@ -89,22 +97,19 @@ export class RulesCache extends DurableObject {
 		const hashArray = Array.from(new Uint8Array(hashBuffer));
 		return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 	}
+}
 
-	private mergeCustomRules(rules: ClearURLsRules) {
-		const mergedRules = structuredClone(rules);
+export function mergeCustomRules(rules: ClearURLsRules) {
+	const mergedRules = structuredClone(rules);
 
-		this.mergeProviderRules(mergedRules.providers.airbnb, CUSTOM_RULES.airbnb.rules);
-		this.mergeProviderRules(mergedRules.providers.google, CUSTOM_RULES.google.rules);
-
-		return mergedRules;
-	}
-
-	private mergeProviderRules(provider: ClearURLsProvider | undefined, customRules: string[]) {
+	for (const [providerName, { rules: customRules }] of Object.entries(CUSTOM_RULES)) {
+		const provider = mergedRules.providers[providerName];
 		if (!provider) {
-			return;
+			continue;
 		}
 
-		const existingRules = provider.rules ?? [];
-		provider.rules = [...new Set([...existingRules, ...customRules])];
+		provider.rules = [...new Set([...(provider.rules ?? []), ...customRules])];
 	}
+
+	return mergedRules;
 }
