@@ -5,24 +5,23 @@ const MAX_CLEANING_PASSES = 10;
 type Providers = ClearURLsRules["providers"];
 type CleaningResult = { href: string; redirectTo: string | null };
 
-export async function cleanUrl(inputUrl: string, rules: ClearURLsRules, maxRedirects = 5, visited = new Set<string>()) {
+export async function cleanUrl(inputUrl: string, rules: ClearURLsRules, redirectsLeft = 5, requested = new Set<string>()) {
 	try {
-		const currentUrl = new URL(inputUrl);
-
-		if (visited.has(currentUrl.href) || visited.size >= maxRedirects) {
-			return applyRules(currentUrl.href, rules.providers, false).href;
-		}
-
-		visited.add(currentUrl.href);
-
-		const { href: cleanedHref, redirectTo } = applyRules(currentUrl.href, rules.providers, true);
+		const canFollow = redirectsLeft > 0;
+		const { href: cleanedHref, redirectTo } = applyRules(new URL(inputUrl).href, rules.providers, canFollow);
 		if (redirectTo) {
-			return await cleanUrl(redirectTo, rules, maxRedirects, visited);
+			return await cleanUrl(redirectTo, rules, redirectsLeft - 1, requested);
 		}
 
-		const redirectTarget = await followRedirect(currentUrl.href);
-		if (redirectTarget && redirectTarget !== currentUrl.href) {
-			return await cleanUrl(redirectTarget, rules, maxRedirects, visited);
+		if (!canFollow || requested.has(cleanedHref)) {
+			return cleanedHref;
+		}
+		requested.add(cleanedHref);
+
+		// Request the cleaned URL so the site never receives the tracking params we strip
+		const redirectTarget = await followRedirect(cleanedHref);
+		if (redirectTarget && redirectTarget !== cleanedHref) {
+			return await cleanUrl(redirectTarget, rules, redirectsLeft - 1, requested);
 		}
 
 		return cleanedHref;

@@ -253,6 +253,11 @@ describe("Redirect following", () => {
 
 	afterEach(() => fetchMock.deactivate());
 
+	function expectAllRequested(...origins: string[]) {
+		const pending = fetchMock.pendingInterceptors().filter((interceptor) => origins.includes(interceptor.origin));
+		expect(pending).toEqual([]);
+	}
+
 	it("follows redirect when HEAD returns 3xx", async () => {
 		fetchMock
 			.get("https://short.test")
@@ -287,11 +292,25 @@ describe("Redirect following", () => {
 	});
 
 	it("does not fall back to GET when HEAD returns 200", async () => {
-		fetchMock.get("https://no-redirect.test").intercept({ path: "/page?utm_source=test", method: "HEAD" }).reply(200);
+		fetchMock.get("https://no-redirect.test").intercept({ path: "/page", method: "HEAD" }).reply(200);
 
 		const testUrl = "https://no-redirect.test/page?utm_source=test";
 		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
 		expect(await response.text()).toBe("https://no-redirect.test/page");
+		expectAllRequested("https://no-redirect.test");
+	});
+
+	it("never sends the tracking params it strips to the sites it requests", async () => {
+		fetchMock
+			.get("https://tracked-short.test")
+			.intercept({ path: "/abc", method: "HEAD" })
+			.reply(301, "", { headers: { Location: "https://tracked-dest.test/target?utm_source=hop" } });
+		fetchMock.get("https://tracked-dest.test").intercept({ path: "/target", method: "HEAD" }).reply(200);
+
+		const testUrl = "https://tracked-short.test/abc?utm_source=share&fbclid=spam";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://tracked-dest.test/target");
+		expectAllRequested("https://tracked-short.test", "https://tracked-dest.test");
 	});
 
 	it("cleans parameters on the redirect target", async () => {
