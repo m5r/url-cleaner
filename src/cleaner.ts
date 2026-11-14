@@ -1,9 +1,12 @@
-import type { ClearURLsProvider, ClearURLsRules } from "./types";
+import type { ClearURLsProvider, ClearURLsRules, ValueRule } from "./types";
 
 const MAX_CLEANING_PASSES = 10;
 
 type Providers = ClearURLsRules["providers"];
 type CleaningResult = { href: string; redirectTo: string | null };
+type SegmentMatcher = (segment: string) => boolean;
+type SegmentMatchers = { query: SegmentMatcher; fragment: SegmentMatcher };
+type CompiledValueRule = { key: RegExp; value: RegExp; base64Payload: RegExp | null };
 
 export async function cleanUrl(inputUrl: string, rules: ClearURLsRules, redirectsLeft = 5, requested = new Set<string>()) {
 	try {
@@ -141,7 +144,17 @@ function providerApplies(providerName: string, provider: ClearURLsProvider, href
 function applyProviderRules(href: string, provider: ClearURLsProvider) {
 	const { href: rawCleaned } = applyRawRules(href, provider.rawRules ?? []);
 	const rules = provider.rules ?? [];
-	return rules.length > 0 ? removeTrackingParams(rawCleaned, rules) : rawCleaned;
+	const valueRules = compileValueRules(provider.valueRules ?? []);
+	if (rules.length === 0 && valueRules.length === 0) {
+		return rawCleaned;
+	}
+
+	const isTrackingKey: SegmentMatcher = (segment) => keyMatchesRule(segment, rules);
+	// Value rules target query tokens only; key rules clean fragments too
+	return removeTrackingParams(rawCleaned, {
+		query: (segment) => isTrackingKey(segment) || matchesValueRule(segment, valueRules),
+		fragment: isTrackingKey,
+	});
 }
 
 function applyRawRules(href: string, rawRules: string[]) {
@@ -165,30 +178,30 @@ function applyRawRules(href: string, rawRules: string[]) {
 const TEXT_DIRECTIVE = ":~:";
 
 // Cuts matching segments out of the href string and keeps everything else byte-for-byte, so surviving params are never re-encoded
-function removeTrackingParams(href: string, rules: string[]) {
+function removeTrackingParams(href: string, isTracking: SegmentMatchers) {
 	const [beforeHash, fragment] = splitOnce(href, "#");
 	const [base, query] = splitOnce(beforeHash, "?");
-	const cleanedQuery = query === null ? null : cleanQuery(query, rules);
-	const cleanedFragment = fragment === null ? null : cleanFragment(fragment, rules);
+	const cleanedQuery = query === null ? null : cleanQuery(query, isTracking.query);
+	const cleanedFragment = fragment === null ? null : cleanFragment(fragment, isTracking.fragment);
 	return base + (cleanedQuery === null ? "" : `?${cleanedQuery}`) + (cleanedFragment === null ? "" : `#${cleanedFragment}`);
 }
 
-function cleanQuery(query: string, rules: string[]) {
-	const cleaned = removeSegments(query, (segment) => segment !== "" && keyMatchesRule(segment, rules));
+function cleanQuery(query: string, isTracking: SegmentMatcher) {
+	const cleaned = removeSegments(query, (segment) => segment !== "" && isTracking(segment));
 	if (cleaned === null) {
 		return query;
 	}
 	return cleaned === "" ? null : cleaned;
 }
 
-function cleanFragment(fragment: string, rules: string[]) {
+function cleanFragment(fragment: string, isTracking: SegmentMatcher) {
 	const directiveIndex = fragment.indexOf(TEXT_DIRECTIVE);
 	const params = directiveIndex === -1 ? fragment : fragment.slice(0, directiveIndex);
 	const directive = directiveIndex === -1 ? "" : fragment.slice(directiveIndex);
 
 	// Hash routes like `#/path?x=1` carry their params after the `?`; bare anchors like `#mc` are never params
 	const [route, routeParams] = splitOnce(params, "?");
-	const cleaned = removeSegments(routeParams ?? route, (segment) => segment.includes("=") && keyMatchesRule(segment, rules));
+	const cleaned = removeSegments(routeParams ?? route, (segment) => segment.includes("=") && isTracking(segment));
 	if (cleaned === null) {
 		return fragment;
 	}
@@ -234,6 +247,51 @@ function keyMatchesRule(segment: string, rules: string[]) {
 	});
 }
 
+function compileValueRules(valueRules: ValueRule[]): CompiledValueRule[] {
+	return valueRules.flatMap((rule) => {
+		try {
+			return [
+				{
+					key: new RegExp(`^(?:${rule.key})$`),
+					value: new RegExp(`^(?:${rule.value})$`),
+					base64Payload: rule.base64Payload === undefined ? null : new RegExp(`^(?:${rule.base64Payload})$`),
+				},
+			];
+		} catch (error) {
+			console.warn(`Invalid value rule regex: ${JSON.stringify(rule)}`, error);
+			return [];
+		}
+	});
+}
+
+function matchesValueRule(segment: string, valueRules: CompiledValueRule[]) {
+	const [rawKey, rawValue] = splitOnce(segment, "=");
+	if (rawValue === null) {
+		return false;
+	}
+	const key = formDecode(rawKey);
+	const value = formDecode(rawValue);
+
+	return valueRules.some((rule) => {
+		if (!rule.key.test(key) || !rule.value.test(value)) {
+			return false;
+		}
+		if (rule.base64Payload === null) {
+			return true;
+		}
+		const payload = decodeBase64(value);
+		return payload !== null && rule.base64Payload.test(payload);
+	});
+}
+
+function decodeBase64(value: string) {
+	try {
+		return atob(value);
+	} catch {
+		return null;
+	}
+}
+
 // The lenient decoding URLSearchParams applies: `+` is a space and malformed escapes stay literal instead of throwing
 function formDecode(value: string) {
 	return new URLSearchParams(`k=${value}`).get("k") ?? value;
@@ -264,8 +322,11 @@ function findRedirection(url: string, redirections: string[]) {
 			const regex = new RegExp(redirectionPattern, "i");
 			const match = url.match(regex);
 			if (match && match[1]) {
-				// First capture group is the target URL
-				return decodeURIComponent(match[1]);
+				// First capture group is the target URL, but loose patterns like Instagram's `.*u=` also capture plain values
+				const target = decodeURIComponent(match[1]);
+				if (isHttpUrl(target)) {
+					return target;
+				}
 			}
 		} catch (error) {
 			console.warn(`Invalid redirection regex: ${redirectionPattern}`, error);
@@ -273,4 +334,16 @@ function findRedirection(url: string, redirections: string[]) {
 	}
 
 	return null;
+}
+
+function isHttpUrl(value: string) {
+	if (!/^https?:\/\//i.test(value)) {
+		return false;
+	}
+	try {
+		new URL(value);
+		return true;
+	} catch {
+		return false;
+	}
 }

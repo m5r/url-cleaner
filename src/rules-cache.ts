@@ -1,12 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
-import type { ClearURLsRules } from "./types";
+import type { ClearURLsProvider, ClearURLsRules } from "./types";
 
 const RULES_URL = "https://rules2.clearurls.xyz/data.minify.json";
 const HASH_URL = "https://rules2.clearurls.xyz/rules.minify.hash";
 const CACHE_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // Custom rules for tracking parameters not yet in ClearURLs database
-const CUSTOM_RULES = {
+const CUSTOM_RULES: Record<string, Pick<ClearURLsProvider, "rules" | "valueRules">> = {
 	airbnb: {
 		// Additional Airbnb tracking parameters found in share URLs
 		rules: ["viralityEntryPoint", "unique_share_id", "slcid", "s", "slug"],
@@ -22,6 +22,12 @@ const CUSTOM_RULES = {
 	},
 	twitter: {
 		rules: ["a"],
+	},
+	// Share links carry a per-share token under a random 4-letter key, e.g. `?xtok=cnF3NHJleTFicGY%3D`
+	// (https://github.com/ClearURLs/Rules/issues/351). The key rotates, so match the value instead: base64 of
+	// a short lowercase alphanumeric payload (`rqw4rey1bpf` here), which ordinary params don't decode to.
+	instagram: {
+		valueRules: [{ key: "[a-z]{4}", value: "[A-Za-z0-9]{14,18}={0,2}", base64Payload: "[a-z0-9]{10,13}" }],
 	},
 };
 
@@ -102,13 +108,14 @@ export class RulesCache extends DurableObject {
 export function mergeCustomRules(rules: ClearURLsRules) {
 	const mergedRules = structuredClone(rules);
 
-	for (const [providerName, { rules: customRules }] of Object.entries(CUSTOM_RULES)) {
+	for (const [providerName, { rules: customRules = [], valueRules: customValueRules = [] }] of Object.entries(CUSTOM_RULES)) {
 		const provider = mergedRules.providers[providerName];
 		if (!provider) {
 			continue;
 		}
 
 		provider.rules = [...new Set([...(provider.rules ?? []), ...customRules])];
+		provider.valueRules = [...(provider.valueRules ?? []), ...customValueRules];
 	}
 
 	return mergedRules;

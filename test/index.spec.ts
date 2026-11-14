@@ -413,6 +413,11 @@ describe("Custom rules", () => {
 		providers: {
 			x: { urlPattern: "^https?:\\/\\/(?:[a-z0-9-]+\\.)*?x.com", rules: upstreamXRules },
 			twitter: { urlPattern: "^https?:\\/\\/(?:[a-z0-9-]+\\.)*?twitter.com", rules: upstreamXRules },
+			instagram: {
+				urlPattern: "^https?:\\/\\/(?:[a-z0-9-]+\\.)*?instagram\\.com",
+				rules: ["igshid", "igsh"],
+				redirections: [".*u=([^&]*)"],
+			},
 			globalRules: { urlPattern: ".*", rules: ["utm_source"] },
 		},
 	};
@@ -424,6 +429,10 @@ describe("Custom rules", () => {
 
 	afterEach(() => fetchMock.deactivate());
 
+	function stubInstagramHead() {
+		fetchMock.get("https://www.instagram.com").intercept({ path: /.*/, method: "HEAD" }).reply(200);
+	}
+
 	it.each(["https://x.com", "https://twitter.com"])("strips the share fingerprint from %s links", async (origin) => {
 		fetchMock.get(origin).intercept({ path: /.*/, method: "HEAD" }).reply(200);
 
@@ -432,6 +441,66 @@ describe("Custom rules", () => {
 			mergeCustomRules(upstreamRules),
 		);
 		expect(cleaned).toBe(`${origin}/user/status/123`);
+	});
+
+	it.each([
+		// The only token seen in the wild; the other values are synthetic
+		["?xtok=cnF3NHJleTFicGY%3D", ""],
+		["?exln=MTc4MmM1YmI2NmZh&utm_source=ig_web_copy_link", ""],
+		["?img_index=2&dlrf=cnF3NHJleTFicGY=", "?img_index=2"],
+		["?xtok=cnF3NHJleTFicGY", ""],
+		["?xtok=cnF3NHJleTFicA%3D%3D", ""],
+		["?xtok=YWJjZGVmZ2hpajEyMw%3D%3D", ""],
+		["?abcu=cnF3NHJleTFicGY%3D", ""],
+		["?img_index=2&zzzu=cnF3NHJleTFicGY%3D", "?img_index=2"],
+		["?q=a%20b+c%2f&xtok=cnF3NHJleTFicGY%3D&e=%E2%9C%93&&z", "?q=a%20b+c%2f&e=%E2%9C%93&&z"],
+	])("strips the rotating Instagram share token from %s", async (query, expectedQuery) => {
+		stubInstagramHead();
+
+		const cleaned = await cleanUrl(`https://www.instagram.com/reel/De5EeGVREDw/${query}`, mergeCustomRules(upstreamRules));
+		expect(cleaned).toBe(`https://www.instagram.com/reel/De5EeGVREDw/${expectedQuery}`);
+	});
+
+	it.each([
+		"/accounts/login/?next=%2Ftv%2FDe5EeGVREDw%2F",
+		"/accounts/login/?next=/tv/De5EeGVREDw/",
+		"/accounts/login/?next=%2Fabcdefghijklmn%2F&hl=en",
+		"/explore/?term=abcdefghijklmnop",
+		"/direct/new/?text=hello+world+foo1",
+		"/p/abc/?code=0123456789abcdef",
+		"/p/abc/?mode=grid&img_index=cnF3NHJleTFicGY%3D&psln=short",
+		"/p/abc/?XTOK=cnF3NHJleTFicGY%3D",
+		"/p/abc/?xt0k=cnF3NHJleTFicGY%3D",
+		"/p/abc/?xtok=UnF3NHJleTFicGY%3D",
+		"/p/abc/?xtok=cnF3NHJleTFicGY%253D",
+		"/p/abc/#xtok=cnF3NHJleTFicGY%3D",
+	])("keeps Instagram params that are not share tokens: %s", async (path) => {
+		stubInstagramHead();
+
+		const url = `https://www.instagram.com${path}`;
+		expect(await cleanUrl(url, mergeCustomRules(upstreamRules))).toBe(url);
+	});
+
+	it("does not apply the Instagram share token rule to other sites", async () => {
+		fetchMock.get("https://example.com").intercept({ path: /.*/, method: "HEAD" }).reply(200);
+
+		const url = "https://example.com/?xtok=cnF3NHJleTFicGY%3D";
+		expect(await cleanUrl(url, mergeCustomRules(upstreamRules))).toBe(url);
+	});
+
+	it("skips custom rules for providers missing upstream", () => {
+		const merged = mergeCustomRules({ providers: { globalRules: { urlPattern: ".*", rules: [] } } });
+		expect(merged.providers).not.toHaveProperty("instagram");
+	});
+
+	it("skips an invalid value rule and keeps cleaning", async () => {
+		const rules: ClearURLsRules = {
+			providers: {
+				site: { urlPattern: ".*", rules: ["utm_source"], valueRules: [{ key: "[a-z", value: "x" }] },
+			},
+		};
+
+		expect(await cleanUrl("https://e.test/?utm_source=x&keep=1", rules, 0)).toBe("https://e.test/?keep=1");
 	});
 });
 
@@ -521,6 +590,26 @@ describe("Provider matching", () => {
 
 		const cleaned = await cleanUrl("https://wrap.test/out?utm_source=x&url=https%3A%2F%2Fdest.test%2Fpage", rules);
 		expect(cleaned).toBe("https://dest.test/page");
+	});
+
+	it.each([
+		["https://l.wrap.test/?u=https%3A%2F%2Fdest.test%2Fpage%3Futm_source%3Dx&e=1", "https://dest.test/page"],
+		["https://l.wrap.test/p?menu=settings&utm_source=x", "https://l.wrap.test/p?menu=settings"],
+		["https://l.wrap.test/?u=www.dest.test%2Fpage", "https://l.wrap.test/?u=www.dest.test%2Fpage"],
+		["https://l.wrap.test/out?url=https%3A%2F%2Fdest.test%2Fpage&menu=x", "https://dest.test/page"],
+	])("only follows redirection captures that are http(s) URLs: %s", async (url, expected) => {
+		stubHead(new URL(expected).origin);
+		const rules: ClearURLsRules = {
+			providers: {
+				wrap: {
+					urlPattern: "^https?:\\/\\/l\\.wrap\\.test",
+					redirections: [".*u=([^&]*)", "^https?:\\/\\/l\\.wrap\\.test\\/out\\?url=([^&]+)"],
+				},
+				globalRules,
+			},
+		};
+
+		expect(await cleanUrl(url, rules)).toBe(expected);
 	});
 
 	it("runs another pass when a later provider lifts a global exception", async () => {
