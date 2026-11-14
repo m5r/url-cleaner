@@ -88,7 +88,7 @@ test/
 - **SHA256 Validation**: Cryptographically verifies rule integrity
 - **Durable Object Caching**: 7-day cache with automatic refresh
 - **Fallback Support**: Uses cached rules if fresh fetch fails
-- **Provider Priority**: Domain-specific providers take precedence over global rules
+- **Provider Stacking**: Every matching provider applies, global rules included, in rules-data order; a provider's exceptions only disable that provider
 
 ### Supported Providers (250+ total)
 

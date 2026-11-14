@@ -2,6 +2,7 @@ import { env, createExecutionContext, waitOnExecutionContext, fetchMock, SELF } 
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 
 import worker, { RulesCache } from "../src/index";
+import { cleanUrl } from "../src/cleaner";
 import type { ClearURLsRules } from "../src/types";
 
 // For now, you'll need to do something like this to get a correctly-typed
@@ -155,6 +156,24 @@ describe("URL Cleaner worker", () => {
 		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
 		const cleanedUrl = await response.text();
 		expect(cleanedUrl).toBe("https://unknown-site.com/?page=1&sort=name");
+	});
+
+	it("applies global rules alongside site rules", async () => {
+		const testUrl = "https://youtube.com/watch?v=abc&feature=share&utm_source=newsletter";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://youtube.com/watch?v=abc");
+	});
+
+	it("keeps repeated query parameters", async () => {
+		const testUrl = "https://example.com/topic?tag=one&tag=two&utm_source=test";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://example.com/topic?tag=one&tag=two");
+	});
+
+	it("keeps repeated fragment parameters", async () => {
+		const testUrl = "https://example.com/page#tag=one&tag=two&utm_source=test";
+		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
+		expect(await response.text()).toBe("https://example.com/page#tag=one&tag=two");
 	});
 
 	it("returns error for missing URL parameter", async () => {
@@ -365,5 +384,133 @@ describe("Redirect following", () => {
 		const testUrl = "https://proto.test/go";
 		const response = await SELF.fetch(`https://example.com/?url=${encodeURIComponent(testUrl)}`);
 		expect(await response.text()).toBe("https://dest.test/page");
+	});
+});
+
+describe("Provider matching", () => {
+	const globalRules = { urlPattern: ".*", rules: ["utm_source"] };
+
+	beforeEach(() => {
+		fetchMock.activate();
+		fetchMock.disableNetConnect();
+	});
+
+	afterEach(() => fetchMock.deactivate());
+
+	function stubHead(origin: string) {
+		fetchMock.get(origin).intercept({ path: /.*/, method: "HEAD" }).reply(200);
+	}
+
+	it("lets a site exception disable only that site's rules", async () => {
+		stubHead("https://www.amazon.com");
+		const rules: ClearURLsRules = {
+			providers: {
+				amazon: {
+					urlPattern: "^https?:\\/\\/(?:[a-z0-9-]+\\.)*?amazon\\.com",
+					rules: ["keywords", "qid"],
+					exceptions: ["^https?:\\/\\/(?:[a-z0-9-]+\\.)*?amazon\\.com\\/s\\?"],
+				},
+				"amazon search": { urlPattern: "^https?:\\/\\/(?:[a-z0-9-]+\\.)*?amazon\\.com\\/s\\?", rules: ["qid"] },
+				globalRules,
+			},
+		};
+
+		const cleaned = await cleanUrl("https://www.amazon.com/s?keywords=book&qid=123&utm_source=x", rules);
+		expect(cleaned).toBe("https://www.amazon.com/s?keywords=book");
+	});
+
+	it("lets a global exception disable only the global rules", async () => {
+		stubHead("https://site.test");
+		const rules: ClearURLsRules = {
+			providers: {
+				globalRules: { ...globalRules, exceptions: ["^https?:\\/\\/site\\.test\\/keep"] },
+				site: { urlPattern: "^https?:\\/\\/site\\.test", rules: ["tracker"] },
+			},
+		};
+
+		const cleaned = await cleanUrl("https://site.test/keep?tracker=1&utm_source=x", rules);
+		expect(cleaned).toBe("https://site.test/keep?utm_source=x");
+	});
+
+	it("keeps cleaning URLs that a provider marks as blocked", async () => {
+		stubHead("https://www.youtube.com");
+		const rules: ClearURLsRules = {
+			providers: {
+				globalRules,
+				youtube_pagead: { urlPattern: "^https?:\\/\\/(?:[a-z0-9-]+\\.)*?youtube\\.com\\/pagead", completeProvider: true },
+			},
+		};
+
+		const cleaned = await cleanUrl("https://www.youtube.com/pagead?utm_source=x", rules);
+		expect(cleaned).toBe("https://www.youtube.com/pagead");
+	});
+
+	it("unwraps redirections from a blocked provider", async () => {
+		stubHead("https://dest.test");
+		const rules: ClearURLsRules = {
+			providers: {
+				ads: {
+					urlPattern: "^https?:\\/\\/ads\\.test",
+					completeProvider: true,
+					redirections: ["^https?:\\/\\/ads\\.test\\/click\\?url=([^&]+)"],
+				},
+				globalRules,
+			},
+		};
+
+		const cleaned = await cleanUrl("https://ads.test/click?url=https%3A%2F%2Fdest.test%2Fpage%3Futm_source%3Dx", rules);
+		expect(cleaned).toBe("https://dest.test/page");
+	});
+
+	it("checks redirections against the URL cleaned by earlier providers", async () => {
+		stubHead("https://dest.test");
+		const rules: ClearURLsRules = {
+			providers: {
+				globalRules,
+				wrapper: { urlPattern: "^https?:\\/\\/wrap\\.test", redirections: ["^https?:\\/\\/wrap\\.test\\/out\\?url=([^&]+)$"] },
+			},
+		};
+
+		const cleaned = await cleanUrl("https://wrap.test/out?utm_source=x&url=https%3A%2F%2Fdest.test%2Fpage", rules);
+		expect(cleaned).toBe("https://dest.test/page");
+	});
+
+	it("runs another pass when a later provider lifts a global exception", async () => {
+		stubHead("https://site.test");
+		const rules: ClearURLsRules = {
+			providers: {
+				globalRules: { ...globalRules, exceptions: ["^https?:\\/\\/site\\.test\\/.*?[?&]ref="] },
+				site: { urlPattern: "^https?:\\/\\/site\\.test", rules: ["ref"] },
+			},
+		};
+
+		const cleaned = await cleanUrl("https://site.test/page?ref=x&utm_source=y", rules);
+		expect(cleaned).toBe("https://site.test/page");
+	});
+
+	it("matches provider URL patterns case-insensitively", async () => {
+		stubHead("https://www.linkedin.com");
+		const rules: ClearURLsRules = {
+			providers: {
+				"LinkedIn Learning": { urlPattern: "^https?:\\/\\/(?:[a-z0-9-]+\\.)*?linkedin\\.com\\/learning", rules: ["u"] },
+				globalRules,
+			},
+		};
+
+		const cleaned = await cleanUrl("https://www.linkedin.com/LEARNING/course?u=123", rules);
+		expect(cleaned).toBe("https://www.linkedin.com/LEARNING/course");
+	});
+
+	it("applies raw rules before parameter rules", async () => {
+		stubHead("https://site.test");
+		const rules: ClearURLsRules = {
+			providers: {
+				site: { urlPattern: "^https?:\\/\\/site\\.test", rawRules: ["x-(?=trk=)"], rules: ["trk"] },
+				globalRules,
+			},
+		};
+
+		const cleaned = await cleanUrl("https://site.test/page?x-trk=1", rules);
+		expect(cleaned).toBe("https://site.test/page");
 	});
 });

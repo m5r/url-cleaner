@@ -1,28 +1,31 @@
-import type { ClearURLsRules } from "./types";
+import type { ClearURLsProvider, ClearURLsRules } from "./types";
+
+const MAX_CLEANING_PASSES = 10;
+
+type Providers = ClearURLsRules["providers"];
+type CleaningResult = { href: string; redirectTo: string | null };
 
 export async function cleanUrl(inputUrl: string, rules: ClearURLsRules, maxRedirects = 5, visited = new Set<string>()) {
 	try {
 		const currentUrl = new URL(inputUrl);
 
 		if (visited.has(currentUrl.href) || visited.size >= maxRedirects) {
-			return cleanUrlParameters(currentUrl, rules.providers);
+			return applyRules(currentUrl.href, rules.providers, false).href;
 		}
 
 		visited.add(currentUrl.href);
 
-		// Check for ClearURLs redirections first
-		const clearUrlsRedirect = checkClearUrlsRedirections(currentUrl.href, rules.providers);
-		if (clearUrlsRedirect && clearUrlsRedirect !== currentUrl.href) {
-			return await cleanUrl(clearUrlsRedirect, rules, maxRedirects, visited);
+		const { href: cleanedHref, redirectTo } = applyRules(currentUrl.href, rules.providers, true);
+		if (redirectTo) {
+			return await cleanUrl(redirectTo, rules, maxRedirects, visited);
 		}
 
-		// Then check for HTTP redirects
 		const redirectTarget = await followRedirect(currentUrl.href);
 		if (redirectTarget && redirectTarget !== currentUrl.href) {
 			return await cleanUrl(redirectTarget, rules, maxRedirects, visited);
 		}
 
-		return cleanUrlParameters(currentUrl, rules.providers);
+		return cleanedHref;
 	} catch (error) {
 		console.error(`Error caught when trying to clean url ${inputUrl}`, error);
 		return inputUrl;
@@ -85,60 +88,84 @@ async function followRedirect(url: string) {
 	}
 }
 
-function cleanUrlParameters(url: URL, providers: ClearURLsRules["providers"]) {
-	const matchingProvider = findMatchingProvider(url.href, providers);
-
-	if (!matchingProvider) {
-		return url.href;
+// Mirrors the ClearURLs extension's pureCleaning: repeat full passes until the URL stops changing
+function applyRules(href: string, providers: Providers, unwrapRedirects: boolean): CleaningResult {
+	let current = href;
+	for (let pass = 0; pass < MAX_CLEANING_PASSES; pass++) {
+		const result = cleaningPass(current, providers, unwrapRedirects);
+		if (result.redirectTo !== null || result.href === current) {
+			return result;
+		}
+		current = result.href;
 	}
+	return { href: current, redirectTo: null };
+}
 
-	if (matchingProvider.completeProvider === true) {
-		throw new Error("URL blocked by ClearURLs rules");
-	}
+// Every applicable provider runs, in rules-data order, on the URL as cleaned by the providers before it
+function cleaningPass(href: string, providers: Providers, unwrapRedirects: boolean): CleaningResult {
+	let current = href;
+	for (const [providerName, provider] of Object.entries(providers)) {
+		if (!providerApplies(providerName, provider, current)) {
+			continue;
+		}
 
-	if (matchingProvider.exceptions && isException(url.href, matchingProvider.exceptions)) {
-		return url.href;
-	}
-
-	if (matchingProvider.rules && matchingProvider.rules.length > 0) {
-		url = cleanParametersByRules(url, matchingProvider.rules);
-		url = cleanFragmentsByRules(url, matchingProvider.rules);
-	}
-
-	if (matchingProvider.rawRules && matchingProvider.rawRules.length > 0) {
-		let cleaned = url.href;
-		for (const rawRule of matchingProvider.rawRules) {
-			try {
-				cleaned = cleaned.replace(new RegExp(rawRule, "gi"), "");
-			} catch (error) {
-				console.warn(`Invalid raw rule regex: ${rawRule}`, error);
+		if (unwrapRedirects) {
+			const redirectTo = findRedirection(current, provider.redirections ?? []);
+			if (redirectTo && redirectTo !== current) {
+				return { href: current, redirectTo };
 			}
 		}
-		try {
-			url = new URL(cleaned);
-		} catch (error) {
-			console.warn("Raw rule produced invalid URL, skipping", error);
+
+		// The extension blocks these only on page loads; its "Copy clean link" skips them and keeps cleaning
+		if (provider.completeProvider) {
+			continue;
 		}
+
+		current = applyProviderRules(current, provider);
+	}
+	return { href: current, redirectTo: null };
+}
+
+function providerApplies(providerName: string, provider: ClearURLsProvider, href: string) {
+	try {
+		if (!new RegExp(provider.urlPattern, "i").test(href)) {
+			return false;
+		}
+	} catch (error) {
+		console.warn(`Invalid URL pattern for provider ${providerName}: ${provider.urlPattern}`, error);
+		return false;
+	}
+
+	return !isException(href, provider.exceptions ?? []);
+}
+
+function applyProviderRules(href: string, provider: ClearURLsProvider) {
+	let url = applyRawRules(href, provider.rawRules ?? []);
+
+	if (provider.rules && provider.rules.length > 0) {
+		url = cleanParametersByRules(url, provider.rules);
+		url = cleanFragmentsByRules(url, provider.rules);
 	}
 
 	return url.href;
 }
 
-function findMatchingProvider(url: string, providers: ClearURLsRules["providers"]) {
-	const { globalRules, ...otherProviders } = providers;
-
-	for (const [providerName, provider] of Object.entries(otherProviders)) {
+function applyRawRules(href: string, rawRules: string[]) {
+	let cleaned = href;
+	for (const rawRule of rawRules) {
 		try {
-			const regex = new RegExp(provider.urlPattern);
-			if (regex.test(url)) {
-				return provider;
-			}
+			cleaned = cleaned.replace(new RegExp(rawRule, "gi"), "");
 		} catch (error) {
-			console.warn(`Invalid URL pattern for provider ${providerName}: ${provider.urlPattern}`, error);
+			console.warn(`Invalid raw rule regex: ${rawRule}`, error);
 		}
 	}
 
-	return globalRules;
+	try {
+		return new URL(cleaned);
+	} catch (error) {
+		console.warn("Raw rule produced invalid URL, skipping", error);
+		return new URL(href);
+	}
 }
 
 function cleanParametersByRules(url: URL, rules: string[]) {
@@ -160,7 +187,7 @@ function cleanParametersByRules(url: URL, rules: string[]) {
 		}
 
 		if (!shouldRemove) {
-			cleanParams.set(key, value);
+			cleanParams.append(key, value);
 		}
 	}
 
@@ -170,7 +197,7 @@ function cleanParametersByRules(url: URL, rules: string[]) {
 
 function cleanFragmentsByRules(url: URL, rules: string[]) {
 	const fragments = extractFragments(url);
-	const cleanFragments = new Map<string, string | null>();
+	const cleanFragments: Fragment[] = [];
 
 	for (const [key, value] of fragments) {
 		let shouldRemove = false;
@@ -187,7 +214,7 @@ function cleanFragmentsByRules(url: URL, rules: string[]) {
 		}
 
 		if (!shouldRemove) {
-			cleanFragments.set(key, value);
+			cleanFragments.push([key, value]);
 		}
 	}
 
@@ -195,8 +222,10 @@ function cleanFragmentsByRules(url: URL, rules: string[]) {
 	return url;
 }
 
+type Fragment = [key: string, value: string | null];
+
 function extractFragments(url: URL) {
-	const fragments = new Map<string, string | null>();
+	const fragments: Fragment[] = [];
 	const hash = url.hash.slice(1); // Remove the #
 
 	if (!hash) return fragments;
@@ -211,13 +240,13 @@ function extractFragments(url: URL) {
 		if (param.length === 2 && param[1]) {
 			value = param[1];
 		}
-		fragments.set(key, value);
+		fragments.push([key, value]);
 	}
 
 	return fragments;
 }
 
-function fragmentsToString(fragments: Map<string, string | null>) {
+function fragmentsToString(fragments: Fragment[]) {
 	const parts: string[] = [];
 	for (const [key, value] of fragments) {
 		if (value !== null) {
@@ -243,14 +272,8 @@ function isException(url: string, exceptions: string[]) {
 	return false;
 }
 
-function checkClearUrlsRedirections(url: string, providers: ClearURLsRules["providers"]) {
-	const matchingProvider = findMatchingProvider(url, providers);
-
-	if (!matchingProvider || !matchingProvider.redirections) {
-		return null;
-	}
-
-	for (const redirectionPattern of matchingProvider.redirections) {
+function findRedirection(url: string, redirections: string[]) {
+	for (const redirectionPattern of redirections) {
 		try {
 			const regex = new RegExp(redirectionPattern, "i");
 			const match = url.match(regex);
