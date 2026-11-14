@@ -139,14 +139,9 @@ function providerApplies(providerName: string, provider: ClearURLsProvider, href
 }
 
 function applyProviderRules(href: string, provider: ClearURLsProvider) {
-	let url = applyRawRules(href, provider.rawRules ?? []);
-
-	if (provider.rules && provider.rules.length > 0) {
-		url = cleanParametersByRules(url, provider.rules);
-		url = cleanFragmentsByRules(url, provider.rules);
-	}
-
-	return url.href;
+	const { href: rawCleaned } = applyRawRules(href, provider.rawRules ?? []);
+	const rules = provider.rules ?? [];
+	return rules.length > 0 ? removeTrackingParams(rawCleaned, rules) : rawCleaned;
 }
 
 function applyRawRules(href: string, rawRules: string[]) {
@@ -167,94 +162,86 @@ function applyRawRules(href: string, rawRules: string[]) {
 	}
 }
 
-function cleanParametersByRules(url: URL, rules: string[]) {
-	const params = new URLSearchParams(url.search);
-	const cleanParams = new URLSearchParams();
+const TEXT_DIRECTIVE = ":~:";
 
-	for (const [key, value] of params) {
-		let shouldRemove = false;
-
-		for (const rule of rules) {
-			try {
-				if (new RegExp("^" + rule + "$", "gi").test(key)) {
-					shouldRemove = true;
-					break;
-				}
-			} catch (error) {
-				console.warn(`Invalid rule regex: ${rule}`, error);
-			}
-		}
-
-		if (!shouldRemove) {
-			cleanParams.append(key, value);
-		}
-	}
-
-	url.search = cleanParams.toString();
-	return url;
+// Cuts matching segments out of the href string and keeps everything else byte-for-byte, so surviving params are never re-encoded
+function removeTrackingParams(href: string, rules: string[]) {
+	const [beforeHash, fragment] = splitOnce(href, "#");
+	const [base, query] = splitOnce(beforeHash, "?");
+	const cleanedQuery = query === null ? null : cleanQuery(query, rules);
+	const cleanedFragment = fragment === null ? null : cleanFragment(fragment, rules);
+	return base + (cleanedQuery === null ? "" : `?${cleanedQuery}`) + (cleanedFragment === null ? "" : `#${cleanedFragment}`);
 }
 
-function cleanFragmentsByRules(url: URL, rules: string[]) {
-	const fragments = extractFragments(url);
-	const cleanFragments: Fragment[] = [];
-
-	for (const [key, value] of fragments) {
-		let shouldRemove = false;
-
-		for (const rule of rules) {
-			try {
-				if (new RegExp("^" + rule + "$", "gi").test(key)) {
-					shouldRemove = true;
-					break;
-				}
-			} catch (error) {
-				console.warn(`Invalid rule regex: ${rule}`, error);
-			}
-		}
-
-		if (!shouldRemove) {
-			cleanFragments.push([key, value]);
-		}
+function cleanQuery(query: string, rules: string[]) {
+	const cleaned = removeSegments(query, (segment) => segment !== "" && keyMatchesRule(segment, rules));
+	if (cleaned === null) {
+		return query;
 	}
-
-	url.hash = fragmentsToString(cleanFragments);
-	return url;
+	return cleaned === "" ? null : cleaned;
 }
 
-type Fragment = [key: string, value: string | null];
+function cleanFragment(fragment: string, rules: string[]) {
+	const directiveIndex = fragment.indexOf(TEXT_DIRECTIVE);
+	const params = directiveIndex === -1 ? fragment : fragment.slice(0, directiveIndex);
+	const directive = directiveIndex === -1 ? "" : fragment.slice(directiveIndex);
 
-function extractFragments(url: URL) {
-	const fragments: Fragment[] = [];
-	const hash = url.hash.slice(1); // Remove the #
-
-	if (!hash) return fragments;
-
-	const params = hash.split("&");
-	for (const p of params) {
-		const param = p.split("=");
-		if (!param[0]) continue;
-
-		const key = param[0];
-		let value: string | null = null;
-		if (param.length === 2 && param[1]) {
-			value = param[1];
-		}
-		fragments.push([key, value]);
+	// Hash routes like `#/path?x=1` carry their params after the `?`; bare anchors like `#mc` are never params
+	const [route, routeParams] = splitOnce(params, "?");
+	const cleaned = removeSegments(routeParams ?? route, (segment) => segment.includes("=") && keyMatchesRule(segment, rules));
+	if (cleaned === null) {
+		return fragment;
 	}
 
-	return fragments;
+	let cleanedParams = cleaned;
+	if (routeParams !== null) {
+		cleanedParams = cleaned === "" ? route : `${route}?${cleaned}`;
+	}
+	const cleanedFragment = cleanedParams + directive;
+	return cleanedFragment === "" ? null : cleanedFragment;
 }
 
-function fragmentsToString(fragments: Fragment[]) {
-	const parts: string[] = [];
-	for (const [key, value] of fragments) {
-		if (value !== null) {
-			parts.push(key + "=" + value);
-		} else {
-			parts.push(key);
-		}
+// Null when nothing matched; otherwise the surviving segments without the empty ones a removal left at the edges
+function removeSegments(list: string, shouldRemove: (segment: string) => boolean) {
+	const segments = list.split("&");
+	const kept = segments.filter((segment) => !shouldRemove(segment));
+	if (kept.length === segments.length) {
+		return null;
 	}
-	return parts.length > 0 ? parts.join("&") : "";
+
+	while (kept.length > 0 && kept[0] === "") {
+		kept.shift();
+	}
+	while (kept.length > 0 && kept[kept.length - 1] === "") {
+		kept.pop();
+	}
+	return kept.join("&");
+}
+
+function keyMatchesRule(segment: string, rules: string[]) {
+	const rawKey = segment.split("=", 1)[0];
+	// Rules target decoded keys, but some spell escapes out literally, e.g. `(?:%3F)?utm…`
+	const keys = [rawKey, formDecode(rawKey)];
+
+	return rules.some((rule) => {
+		try {
+			const regex = new RegExp("^" + rule + "$", "i");
+			return keys.some((key) => regex.test(key));
+		} catch (error) {
+			console.warn(`Invalid rule regex: ${rule}`, error);
+			return false;
+		}
+	});
+}
+
+// The lenient decoding URLSearchParams applies: `+` is a space and malformed escapes stay literal instead of throwing
+function formDecode(value: string) {
+	return new URLSearchParams(`k=${value}`).get("k") ?? value;
+}
+
+function splitOnce(value: string, separator: string): [string, string | null] {
+	const index = value.indexOf(separator);
+	return index === -1 ? [value, null] : [value.slice(0, index), value.slice(index + 1)];
 }
 
 function isException(url: string, exceptions: string[]) {

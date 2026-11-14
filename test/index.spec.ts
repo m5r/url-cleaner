@@ -1,5 +1,5 @@
 import { env, createExecutionContext, waitOnExecutionContext, fetchMock, SELF } from "cloudflare:test";
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 
 import worker, { RulesCache } from "../src/index";
 import { cleanUrl } from "../src/cleaner";
@@ -560,5 +560,67 @@ describe("Provider matching", () => {
 
 		const cleaned = await cleanUrl("https://site.test/page?x-trk=1", rules);
 		expect(cleaned).toBe("https://site.test/page");
+	});
+});
+
+describe("Parameter removal", () => {
+	const rules: ClearURLsRules = {
+		providers: {
+			globalRules: { urlPattern: ".*", rules: ["(?:%3F)?utm(?:_[a-z_]*)?", "(?:%3F)?fbclid", "(?:%3F)?[a-z]?mc"] },
+		},
+	};
+	const cleanWithoutRedirects = (url: string) => cleanUrl(url, rules, 0);
+
+	it.each([
+		"https://e.test/?q=hello%20world",
+		"https://e.test/?q=a+b",
+		"https://e.test/?flag",
+		"https://e.test/?flag=",
+		"https://e.test/?name=a~b",
+		"https://e.test/?x=(1)!*%27",
+		"https://e.test/?sig=a%2fb",
+		"https://e.test/?e=caf%E9",
+		"https://e.test/?x=%zz",
+		"https://e.test/?a=1&&b=2",
+		"https://e.test/?a=1;utm_source=x",
+		"https://e.test/?",
+	])("leaves %s untouched when nothing matches", async (url) => {
+		expect(await cleanWithoutRedirects(url)).toBe(url);
+	});
+
+	it.each([
+		["https://e.test/?q=x%20y&utm_source=1&flag", "https://e.test/?q=x%20y&flag"],
+		["https://e.test/?utm_source=1#frag", "https://e.test/#frag"],
+		["https://e.test/?utm_source=1&", "https://e.test/"],
+		["https://e.test/?a=1&&utm_source=x&b=2", "https://e.test/?a=1&&b=2"],
+		["https://e.test/?utm%5Fsource=1&UTM_Source=2&%3Futm_source=3&a=1", "https://e.test/?a=1"],
+		["https://e.test/?%zz=1&utm_source=2", "https://e.test/?%zz=1"],
+	])("removes only the matching query segments from %s", async (url, expected) => {
+		expect(await cleanWithoutRedirects(url)).toBe(expected);
+	});
+
+	it.each([
+		["https://e.test/page#mc", "https://e.test/page#mc"],
+		["https://e.test/page#utm", "https://e.test/page#utm"],
+		["https://e.test/page#a=b=c", "https://e.test/page#a=b=c"],
+		["https://e.test/page#a=", "https://e.test/page#a="],
+		["https://e.test/page#:~:text=a=b", "https://e.test/page#:~:text=a=b"],
+		["https://e.test/page#x=1&utm_source=y:~:text=foo", "https://e.test/page#x=1:~:text=foo"],
+		["https://e.test/page#/path?utm_source=y&x=1", "https://e.test/page#/path?x=1"],
+		["https://e.test/page#/path?utm_source=y", "https://e.test/page#/path"],
+		["https://e.test/page#utm_campaign=test", "https://e.test/page"],
+	])("cleans the fragment of %s", async (url, expected) => {
+		expect(await cleanWithoutRedirects(url)).toBe(expected);
+	});
+
+	it("requests the surviving params exactly as they were written", async () => {
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 200 }));
+		try {
+			const cleaned = await cleanUrl("https://e.test/go?q=x%20y&sig=a%2fb&utm_source=z", rules);
+			expect(cleaned).toBe("https://e.test/go?q=x%20y&sig=a%2fb");
+			expect(fetchSpy.mock.calls.map(([input]) => input)).toEqual(["https://e.test/go?q=x%20y&sig=a%2fb"]);
+		} finally {
+			fetchSpy.mockRestore();
+		}
 	});
 });

@@ -77,6 +77,7 @@ test/
 - **Provider-Specific Rules**: Domain-specific rules prevent false positives and preserve functionality
 - **Query Parameter Cleaning**: Removes tracking from URL query parameters (`?utm_source=test`)
 - **Fragment Cleaning**: Removes tracking from URL fragments/hash parameters (`#utm_campaign=test`)
+- **Encoding Preservation**: Only matching `&`-separated segments are cut; every surviving param keeps its original bytes (no re-encoding). In fragments only `key=value` segments are removed, after the `?` for hash routes (`#/path?x=1`); bare anchors (`#mc`) and text fragments (`#:~:text=`) are left alone
 - **Raw Rules Support**: Handles complex regex-based cleaning for advanced tracking patterns
 - **Loop Prevention**: Tracks visited URLs to prevent infinite redirect loops
 - **Response Caching**: 1-hour cache using Cloudflare Cache API for improved performance
